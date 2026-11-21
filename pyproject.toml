@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antigravity-whale-pet"
-version = "1.0.0"
+version = "1.1.0"
 description = "DeepSeek 鲸鱼娘（吃白饭的蓝色大肥鱼）桌面宠物 — 与 Google Antigravity 实时工作状态深度联动"
 readme = "README.md"
 license = "MIT"

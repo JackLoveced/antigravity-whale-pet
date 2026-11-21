@@ -52,6 +52,12 @@ from antigravity_whale_pet.assets_manager import (
     fetch_assets,
     resolve_assets_dir,
 )
+from antigravity_whale_pet.lifecycle import (
+    disable_autostart,
+    enable_autostart,
+    is_antigravity_running,
+    is_autostart_enabled,
+)
 from antigravity_whale_pet.protocol import (
     PET_HOST,
     PET_PORT,
@@ -363,7 +369,12 @@ class MonitorDialog(QWidget):
 class WhaleMaidPetWindow(QWidget):
     """Frameless transparent floating DeepSeek 鲸鱼娘 desktop pet."""
 
-    def __init__(self, assets_dir: Path, initial_scale: float = 1.0) -> None:
+    def __init__(
+        self,
+        assets_dir: Path,
+        initial_scale: float = 1.0,
+        follow_antigravity: bool = False,
+    ) -> None:
         super().__init__()
         self.assets_dir = assets_dir
         self.player = WebmAnimationPlayer(assets_dir)
@@ -386,6 +397,9 @@ class WhaleMaidPetWindow(QWidget):
         self.always_on_top: bool = True
         self.show_bubbles: bool = True
         self.sound_enabled: bool = True
+        self.follow_antigravity: bool = follow_antigravity
+        self._agy_missed_checks: int = 0
+        self._agy_seen_running: bool = is_antigravity_running() if follow_antigravity else False
 
         # Orientation & spring bounce
         self.facing_left: bool = False
@@ -453,6 +467,11 @@ class WhaleMaidPetWindow(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(16)
+
+        # Lightweight lifecycle timer: auto-exit when Antigravity closes (if enabled)
+        self._lifecycle_timer = QTimer(self)
+        self._lifecycle_timer.timeout.connect(self._check_antigravity_lifecycle)
+        self._lifecycle_timer.start(2500)
 
     def _load_custom_font(self) -> str:
         if self.font_path.exists():
@@ -1154,6 +1173,16 @@ class WhaleMaidPetWindow(QWidget):
         act_sound.triggered.connect(lambda c: setattr(self, "sound_enabled", c))
         menu.addAction(act_sound)
 
+        act_follow = QAction("🔗 随 Antigravity 关闭自动退出", self, checkable=True)
+        act_follow.setChecked(self.follow_antigravity)
+        act_follow.triggered.connect(self._toggle_follow_antigravity)
+        menu.addAction(act_follow)
+
+        act_autostart = QAction("⚡ 随 Antigravity 自动启停（开机守护）", self, checkable=True)
+        act_autostart.setChecked(is_autostart_enabled())
+        act_autostart.triggered.connect(self._toggle_autostart)
+        menu.addAction(act_autostart)
+
         sub_scale = menu.addMenu("🔍 体型大小")
         for label, sc in [("迷你 (75%)", 0.75), ("标准 (100%)", 1.0), ("大号 (130%)", 1.3)]:
             a = QAction(label, self, checkable=True)
@@ -1185,6 +1214,44 @@ class WhaleMaidPetWindow(QWidget):
         if checked:
             self.say("气泡回来啦~", duration=2.5)
 
+    def _check_antigravity_lifecycle(self) -> None:
+        if not self.follow_antigravity:
+            return
+        if is_antigravity_running():
+            self._agy_seen_running = True
+            self._agy_missed_checks = 0
+        elif self._agy_seen_running:
+            self._agy_missed_checks += 1
+            if self._agy_missed_checks >= 2:
+                self._quit_app()
+
+    def _toggle_follow_antigravity(self, checked: bool) -> None:
+        self.follow_antigravity = checked
+        self._agy_missed_checks = 0
+        if checked:
+            self._agy_seen_running = is_antigravity_running()
+            self.say("收到！Antigravity 关闭时我也会自动下班~", duration=3.0)
+        else:
+            self.say("已关闭自动退出，我会一直陪着你~", duration=2.8)
+
+    def _toggle_autostart(self, checked: bool) -> None:
+        try:
+            if checked:
+                enable_autostart(
+                    assets_dir=str(self.assets_dir),
+                    scale=self.pet_scale,
+                    start_now=True,
+                )
+                self.follow_antigravity = True
+                self._agy_seen_running = is_antigravity_running()
+                self._agy_missed_checks = 0
+                self.say("已开启开机守护！以后随 Antigravity 自动开关~", duration=3.5)
+            else:
+                disable_autostart()
+                self.say("已关闭开机自动守护~", duration=2.8)
+        except Exception as exc:
+            self.say(f"设置自启失败: {exc}", duration=4.0)
+
     def _set_scale(self, scale: float) -> None:
         center = self.frameGeometry().center()
         self.pet_scale = scale
@@ -1193,7 +1260,11 @@ class WhaleMaidPetWindow(QWidget):
         self._trigger_squish(0.16)
 
 
-def main(assets_dir: Optional[str | Path] = None, scale: float = 1.0) -> None:
+def main(
+    assets_dir: Optional[str | Path] = None,
+    scale: float = 1.0,
+    follow_antigravity: bool = False,
+) -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
@@ -1223,7 +1294,11 @@ def main(assets_dir: Optional[str | Path] = None, scale: float = 1.0) -> None:
             )
             sys.exit(1)
 
-    pet = WhaleMaidPetWindow(assets_dir=resolved, initial_scale=scale)
+    pet = WhaleMaidPetWindow(
+        assets_dir=resolved,
+        initial_scale=scale,
+        follow_antigravity=follow_antigravity,
+    )
     pet.show()
     sys.exit(app.exec())
 

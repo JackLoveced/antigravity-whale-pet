@@ -19,6 +19,14 @@ from antigravity_whale_pet.hooks import (
     install_hooks,
     remove_hooks,
 )
+from antigravity_whale_pet.lifecycle import (
+    disable_autostart,
+    enable_autostart,
+    is_antigravity_running,
+    is_autostart_enabled,
+    is_watcher_running,
+    run_watcher_daemon,
+)
 
 
 def _cmd_status(assets_dir_arg: str | None) -> None:
@@ -32,15 +40,17 @@ def _cmd_status(assets_dir_arg: str | None) -> None:
     )
 
     print(f"antigravity-whale-pet v{__version__}")
-    print(f"  Assets dir  : {assets_dir} ({clip_count} .webm clips)")
-    print(f"  Hooks status: {hooks_status()}")
-    print(f"  Antigravity : {brain_root} ({conv_count} conversations found)")
+    print(f"  Assets dir     : {assets_dir} ({clip_count} .webm clips)")
+    print(f"  Hooks status   : {hooks_status()}")
+    print(f"  Antigravity    : {'RUNNING' if is_antigravity_running() else 'NOT RUNNING'} ({conv_count} conversations)")
+    print(f"  Auto-start     : {'ENABLED' if is_autostart_enabled() else 'DISABLED'}")
+    print(f"  Watcher daemon : {'ACTIVE' if is_watcher_running() else 'STOPPED'}")
 
 
 def main(argv: list[str] | None = None) -> None:
     args_list = sys.argv[1:] if argv is None else argv
 
-    # Fast path for Antigravity hook invocation
+    # Fast paths for zero-overhead hook & background lifecycle watcher
     if args_list and args_list[0] == "emit-hook":
         emit_hook_from_stdin(args_list[1:])
         return
@@ -53,10 +63,39 @@ def main(argv: list[str] | None = None) -> None:
 
     sub = parser.add_subparsers(dest="command")
 
-    # run (default when no subcommand given)
+    # run (default)
     p_run = sub.add_parser("run", help="启动桌面宠物（默认命令）")
     p_run.add_argument("--assets-dir", default=None, help="自定义素材目录（含 webm/ 文件夹）")
     p_run.add_argument("--scale", type=float, default=1.0, help="初始缩放比例（默认 1.0）")
+    p_run.add_argument(
+        "--follow-antigravity",
+        action="store_true",
+        help="跟随 Antigravity 生命周期：检测到 Antigravity 关闭时自动退出桌宠",
+    )
+
+    # watch (lifecycle daemon)
+    p_watch = sub.add_parser(
+        "watch",
+        help="后台轻量守护进程：随 Antigravity 启动自动打开桌宠，随其关闭自动退出（<10MB 内存）",
+    )
+    p_watch.add_argument("--interval", type=float, default=2.0, help="检测间隔秒数（默认 2.0）")
+    p_watch.add_argument("--assets-dir", default=None, help="自定义素材目录")
+    p_watch.add_argument("--scale", type=float, default=1.0, help="桌宠初始缩放比例")
+
+    # enable-autostart / disable-autostart
+    p_auto_on = sub.add_parser(
+        "enable-autostart",
+        help="开启开机自动守护（系统登录后静默监听 Antigravity 启停并自动开关桌宠）",
+    )
+    p_auto_on.add_argument("--assets-dir", default=None, help="自定义素材目录")
+    p_auto_on.add_argument("--scale", type=float, default=1.0, help="桌宠初始缩放比例")
+    p_auto_on.add_argument(
+        "--no-start",
+        action="store_true",
+        help="仅写入开机自启配置，暂不立即拉起守护进程",
+    )
+
+    sub.add_parser("disable-autostart", help="关闭开机自动守护并移除自启配置")
 
     # fetch-assets
     p_fetch = sub.add_parser("fetch-assets", help="自动下载 114 段开源鲸鱼娘透明动画素材 (MIT)")
@@ -68,10 +107,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("install-hooks", help="安装/更新全局 Antigravity Hooks (~/.gemini/config/hooks.json)")
     sub.add_parser("disable-hooks", help="临时禁用全局 Antigravity Hooks")
     sub.add_parser("remove-hooks", help="移除全局 Antigravity Hooks 配置")
-    p_status = sub.add_parser("status", help="查看素材、Hooks 与 Antigravity 会话状态")
+    p_status = sub.add_parser("status", help="查看素材、Hooks、Antigravity 与自动启停守护状态")
     p_status.add_argument("--assets-dir", default=None, help="检查指定素材目录")
 
-    # emit-hook (hidden internal hook handler)
+    # hidden internal hook handler
     sub.add_parser("emit-hook", help=argparse.SUPPRESS)
 
     ns = parser.parse_args(args_list)
@@ -79,9 +118,31 @@ def main(argv: list[str] | None = None) -> None:
     if ns.command in (None, "run"):
         from antigravity_whale_pet.app import main as launch_gui
 
-        assets_dir = getattr(ns, "assets_dir", None)
-        scale = getattr(ns, "scale", 1.0)
-        launch_gui(assets_dir=assets_dir, scale=scale)
+        launch_gui(
+            assets_dir=getattr(ns, "assets_dir", None),
+            scale=getattr(ns, "scale", 1.0),
+            follow_antigravity=getattr(ns, "follow_antigravity", False),
+        )
+    elif ns.command == "watch":
+        run_watcher_daemon(
+            poll_interval=max(0.8, ns.interval),
+            assets_dir=ns.assets_dir,
+            scale=ns.scale,
+        )
+    elif ns.command == "enable-autostart":
+        loc = enable_autostart(
+            assets_dir=ns.assets_dir,
+            scale=ns.scale,
+            start_now=not ns.no_start,
+        )
+        print(f"已开启「随 Antigravity 自动启停」开机守护：{loc}")
+        if not ns.no_start:
+            print("守护进程已在后台静默运行，打开/关闭 Antigravity 时鲸鱼娘将自动联动。")
+    elif ns.command == "disable-autostart":
+        if disable_autostart():
+            print("已关闭「随 Antigravity 自动启停」开机守护。")
+        else:
+            print("当前未开启开机自动守护。")
     elif ns.command == "fetch-assets":
         target = Path(ns.target) if ns.target else None
         fetch_assets(target_dir=target, mirror_prefix=ns.mirror, force=ns.force)

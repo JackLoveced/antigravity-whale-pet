@@ -37,6 +37,10 @@
 | 本轮回复完成 | `工作状态-雀跃庆祝` / `放烟花` | 🟡 回复完成 |
 | 闲置 5 分钟 | `睡觉-开始` → `睡觉-循环`（开工立刻惊醒） | ⚪ 小憩沉眠中 |
 
+- **⚡ 随 Antigravity 自动启停（开机静默守护）**
+  - 内置纯标准库轻量守护进程 `agy-pet watch`（**<10 MB 内存、零 GPU 占用**），不加载任何 UI 库。
+  - **打开 Antigravity 自动弹出鲸鱼娘，关闭 Antigravity 自动退出下班**；如果在 Antigravity 运行期间你手动右键关掉了鲸鱼娘，本轮不会再打扰你，直到下次重新打开 Antigravity。
+  - 支持 Windows（注册表 `HKCU\...\Run`）、macOS（`LaunchAgents`）与 Linux（`~/.config/autostart`）一键开关，也可直接在桌宠右键菜单勾选开启/关闭。
 - **实时炫 Token 统计（吃白饭计数器）**：自动累计当前会话消耗的 Token，支持随时右键 **🍚 投喂大肥鱼（吃白饭 / 吃 Token）**。
 - **完整桌宠物理与互动**：
   - **单击戳一戳**：5 种随机回应动画 + 鸭鸭音效 + Q 弹回弹
@@ -64,7 +68,10 @@ agy-pet fetch-assets
 # 3. （可选）一键注册全局 Antigravity Hooks
 agy-pet install-hooks
 
-# 4. 启动鲸鱼娘！
+# 4. （推荐）开启「随 Antigravity 自动启停」开机守护（打开 Antigravity 自动弹出，关闭自动退出）
+agy-pet enable-autostart
+
+# 5. 或手动启动鲸鱼娘：
 agy-pet        # 终端启动
 # Windows 推荐无黑框直接启动：
 agy-petw
@@ -91,14 +98,18 @@ cd antigravity-whale-pet
 ## 🛠️ CLI 命令一览
 
 ```bash
-agy-pet                        # 启动桌面宠物（首次无素材时自动弹窗提示下载）
-agy-pet run --scale 1.25       # 以 125% 体型启动
-agy-pet run --assets-dir PATH  # 加载自定义 dsh-pet 动画素材目录
-agy-pet fetch-assets           # 下载/校验 114 段透明动画素材至 ~/.antigravity-whale-pet/assets
-agy-pet install-hooks          # 注册全局 Antigravity Hooks (~/.gemini/config/hooks.json)
-agy-pet disable-hooks          # 临时禁用全局 Hooks
-agy-pet remove-hooks           # 移除全局 Hooks
-agy-pet status                 # 检查素材数量、Hooks 状态与 Antigravity 会话监听状态
+agy-pet                            # 手动启动桌面宠物（首次无素材时自动弹窗提示下载）
+agy-pet run --follow-antigravity   # 启动桌宠，并在 Antigravity 关闭时自动退出
+agy-pet run --scale 1.25           # 以 125% 体型启动
+agy-pet run --assets-dir PATH      # 加载自定义 dsh-pet 动画素材目录
+agy-pet watch                      # 启动轻量后台守护（随 Antigravity 自动打开/关闭桌宠）
+agy-pet enable-autostart           # 注册开机自动守护（Win / macOS / Linux 跨平台）
+agy-pet disable-autostart          # 移除开机自动守护
+agy-pet fetch-assets               # 下载/校验 114 段透明动画素材至 ~/.antigravity-whale-pet/assets
+agy-pet install-hooks              # 注册全局 Antigravity Hooks (~/.gemini/config/hooks.json)
+agy-pet disable-hooks              # 临时禁用全局 Hooks
+agy-pet remove-hooks               # 移除全局 Hooks
+agy-pet status                     # 查看素材、Hooks、Antigravity 运行态与守护状态
 ```
 
 ---
