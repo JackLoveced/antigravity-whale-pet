@@ -8,7 +8,9 @@ for Google Antigravity to open.
 from __future__ import annotations
 
 import ctypes
+import datetime
 import json
+import os
 import platform
 import select
 import socket
@@ -22,6 +24,7 @@ from antigravity_whale_pet.protocol import PET_HOST, PET_PORT
 
 WATCHER_LOCK_PORT = 39482
 AUTOSTART_NAME = "AntigravityWhalePetWatcher"
+WATCHER_LOG_PATH = Path.home() / ".antigravity-whale-pet" / "watcher.log"
 
 # Exact process names belonging to Google Antigravity (never matching agy-pet / whale-pet)
 _WIN_PROCESS_NAMES = frozenset(
@@ -38,6 +41,19 @@ _POSIX_PROCESS_NAMES = frozenset(
         "agy",
     }
 )
+
+
+def _log(msg: str) -> None:
+    try:
+        WATCHER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Keep log file tiny (<64 KB)
+        if WATCHER_LOG_PATH.exists() and WATCHER_LOG_PATH.stat().st_size > 65536:
+            WATCHER_LOG_PATH.write_text("", encoding="utf-8")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with WATCHER_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
 
 
 def _is_antigravity_running_windows() -> bool:
@@ -207,16 +223,12 @@ def run_watcher_daemon(
     assets_dir: Optional[str] = None,
     scale: float = 1.0,
 ) -> None:
-    """Keep the pet automatically synced with Antigravity's open/close lifecycle.
-
-    - Starts the desktop pet automatically when Antigravity opens (unless one is already open).
-    - Closes the desktop pet automatically when Antigravity exits.
-    - If the user manually quits the pet while Antigravity is still open,
-      respects that choice until Antigravity is closed and opened again.
-    """
+    """Keep the pet automatically synced with Antigravity's open/close lifecycle."""
     lock_sock = _acquire_watcher_lock()
     if lock_sock is None:
-        return  # Another watcher instance is already running
+        return
+
+    _log(f"Watcher daemon started (pid={os.getpid()}, assets_dir={assets_dir}, scale={scale})")
 
     pet_proc: Optional[subprocess.Popen] = None
     dismissed_for_session = False
@@ -236,13 +248,15 @@ def run_watcher_daemon(
         if assets_dir:
             cmd.extend(["--assets-dir", assets_dir])
 
-        kwargs: dict = {}
-        if platform.system() == "Windows":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen(cmd, **kwargs)
+        # NOTE: Do NOT pass CREATE_NO_WINDOW to a GUI pythonw.exe process on Windows,
+        # otherwise the child GUI window may inherit SW_HIDE / hidden window state.
+        proc = subprocess.Popen(cmd, close_fds=True)
+        _log(f"Antigravity detected -> spawned pet pid={proc.pid}")
+        return proc
 
     def _stop_pet() -> None:
         nonlocal pet_proc
+        _log("Antigravity closed -> stopping pet")
         _notify_pet_antigravity_closed()
         if pet_proc is None:
             return
@@ -261,12 +275,12 @@ def run_watcher_daemon(
         pet_proc = None
 
     def _wait_or_stop(timeout: float) -> bool:
-        """Sleep up to timeout seconds, returning True if STOP_WATCHER command arrived."""
         try:
             readable, _, _ = select.select([lock_sock], [], [], timeout)
             if readable:
                 data, _ = lock_sock.recvfrom(1024)
                 if data.strip() == b"STOP_WATCHER":
+                    _log("Received STOP_WATCHER signal")
                     return True
         except Exception:
             time.sleep(timeout)
@@ -276,8 +290,9 @@ def run_watcher_daemon(
         while True:
             agy_alive = is_antigravity_running()
 
-            # Detect if the user manually closed the pet while Antigravity is still running
             if pet_proc is not None and pet_proc.poll() is not None:
+                rc = pet_proc.returncode
+                _log(f"Pet process exited (returncode={rc}, agy_alive={agy_alive})")
                 pet_proc = None
                 if agy_alive:
                     dismissed_for_session = True
@@ -288,7 +303,6 @@ def run_watcher_daemon(
                     dismissed_for_session = False
                 was_running = True
 
-                # Spawn pet only if not dismissed and no existing pet already holds PET_PORT
                 if (
                     pet_proc is None
                     and not dismissed_for_session
@@ -296,12 +310,12 @@ def run_watcher_daemon(
                 ):
                     try:
                         pet_proc = _spawn_pet()
-                    except Exception:
+                    except Exception as exc:
+                        _log(f"Failed to spawn pet: {exc}")
                         pet_proc = None
             else:
                 if was_running:
                     missed_checks += 1
-                    # Require 2 consecutive misses (~4s) to ignore brief app restarts
                     if missed_checks >= 2:
                         was_running = False
                         dismissed_for_session = False
@@ -314,17 +328,23 @@ def run_watcher_daemon(
     except KeyboardInterrupt:
         pass
     finally:
+        _log("Watcher daemon exited")
         lock_sock.close()
 
 
 # --- Cross-platform OS Login Auto-Start Management ---
 
-def _win_run_command(assets_dir: Optional[str] = None, scale: float = 1.0) -> str:
-    pyw = _gui_python_executable()
-    cmd = f'"{pyw}" -m antigravity_whale_pet watch --scale {scale}'
-    if assets_dir:
-        cmd += f' --assets-dir "{assets_dir}"'
-    return cmd
+def _win_startup_vbs_path() -> Path:
+    appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return (
+        Path(appdata)
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+        / f"{AUTOSTART_NAME}.vbs"
+    )
 
 
 def _macos_plist_path() -> Path:
@@ -343,17 +363,21 @@ def enable_autostart(
     """Register `agy-pet watch` to run silently on user login."""
     system = platform.system()
     if system == "Windows":
-        import winreg
-
-        cmd = _win_run_command(assets_dir=assets_dir, scale=scale)
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
-        location = f"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\{AUTOSTART_NAME}"
+        # Use standard Windows Startup folder (.vbs) — reliable, transparent, no AV registry alerts!
+        vbs_path = _win_startup_vbs_path()
+        vbs_path.parent.mkdir(parents=True, exist_ok=True)
+        pyw = _gui_python_executable()
+        args = f'-m antigravity_whale_pet watch --scale {scale}'
+        if assets_dir:
+            args += f' --assets-dir "{assets_dir}"'
+        # Pure ASCII VBScript escaping quotes cleanly
+        cmd_vbs = f'""{pyw}"" {args}'.replace('"', '""')
+        vbs_content = (
+            'Set sh = CreateObject("WScript.Shell")\r\n'
+            f'sh.Run """{pyw}"" {args.replace(chr(34), chr(34) * 2)}", 0, False\r\n'
+        )
+        vbs_path.write_text(vbs_content, encoding="ascii", errors="ignore")
+        location = str(vbs_path)
     elif system == "Darwin":
         plist = _macos_plist_path()
         plist.parent.mkdir(parents=True, exist_ok=True)
@@ -423,11 +447,13 @@ def start_watcher_background(assets_dir: Optional[str] = None, scale: float = 1.
     kwargs: dict = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
+        "close_fds": True,
     }
     if platform.system() == "Windows":
+        # Valid Win32 flags: DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP (never combine with CREATE_NO_WINDOW)
         kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         )
     else:
         kwargs["start_new_session"] = True
@@ -442,9 +468,15 @@ def disable_autostart(stop_running: bool = True) -> bool:
 
     system = platform.system()
     if system == "Windows":
-        import winreg
-
+        removed = False
+        vbs_path = _win_startup_vbs_path()
+        if vbs_path.exists():
+            vbs_path.unlink()
+            removed = True
+        # Also clean up legacy v1.1.0 HKCU\Run key if present
         try:
+            import winreg
+
             with winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -452,9 +484,10 @@ def disable_autostart(stop_running: bool = True) -> bool:
                 winreg.KEY_SET_VALUE,
             ) as key:
                 winreg.DeleteValue(key, AUTOSTART_NAME)
-            return True
-        except FileNotFoundError:
-            return False
+            removed = True
+        except Exception:
+            pass
+        return removed
     elif system == "Darwin":
         plist = _macos_plist_path()
         if plist.exists():
@@ -473,9 +506,11 @@ def is_autostart_enabled() -> bool:
     """Return True if login auto-start is currently registered."""
     system = platform.system()
     if system == "Windows":
-        import winreg
-
+        if _win_startup_vbs_path().exists():
+            return True
         try:
+            import winreg
+
             with winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run",
@@ -484,7 +519,7 @@ def is_autostart_enabled() -> bool:
             ) as key:
                 winreg.QueryValueEx(key, AUTOSTART_NAME)
             return True
-        except FileNotFoundError:
+        except Exception:
             return False
     elif system == "Darwin":
         return _macos_plist_path().exists()
