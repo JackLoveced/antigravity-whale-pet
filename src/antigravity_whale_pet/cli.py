@@ -70,7 +70,13 @@ def main(argv: list[str] | None = None) -> None:
     p_run.add_argument(
         "--follow-antigravity",
         action="store_true",
-        help="跟随 Antigravity 生命周期：检测到 Antigravity 关闭时自动退出桌宠",
+        default=True,
+        help="跟随 Antigravity 生命周期：检测到 Antigravity 关闭时自动退出桌宠（默认开启）",
+    )
+    p_run.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="关闭自动退出，即使 Antigravity 关闭也保持桌宠常驻",
     )
 
     # watch (lifecycle daemon)
@@ -118,10 +124,12 @@ def main(argv: list[str] | None = None) -> None:
     if ns.command in (None, "run"):
         from antigravity_whale_pet.app import main as launch_gui
 
+        no_follow = getattr(ns, "no_follow", False)
+        follow = False if no_follow else getattr(ns, "follow_antigravity", True)
         launch_gui(
             assets_dir=getattr(ns, "assets_dir", None),
             scale=getattr(ns, "scale", 1.0),
-            follow_antigravity=getattr(ns, "follow_antigravity", False),
+            follow_antigravity=follow,
         )
     elif ns.command == "watch":
         run_watcher_daemon(

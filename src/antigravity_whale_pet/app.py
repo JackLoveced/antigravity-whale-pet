@@ -373,7 +373,7 @@ class WhaleMaidPetWindow(QWidget):
         self,
         assets_dir: Path,
         initial_scale: float = 1.0,
-        follow_antigravity: bool = False,
+        follow_antigravity: bool = True,
     ) -> None:
         super().__init__()
         self.assets_dir = assets_dir
@@ -768,6 +768,9 @@ class WhaleMaidPetWindow(QWidget):
                 bubble=f"哎呀，{cn_tool} 报错啦！",
                 badge=f"报错 · {cn_tool}",
             )
+        elif event == "AntigravityClosed":
+            if self.follow_antigravity:
+                self._quit_app()
         elif event == "Stop" and reason == "USER_CANCELED":
             self.state = STATE_IDLE
             self.status_badge = "Antigravity · 待命中"
@@ -1263,7 +1266,7 @@ class WhaleMaidPetWindow(QWidget):
 def main(
     assets_dir: Optional[str | Path] = None,
     scale: float = 1.0,
-    follow_antigravity: bool = False,
+    follow_antigravity: bool = True,
 ) -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

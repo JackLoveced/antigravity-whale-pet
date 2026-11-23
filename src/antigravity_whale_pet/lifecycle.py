@@ -8,9 +8,9 @@ for Google Antigravity to open.
 from __future__ import annotations
 
 import ctypes
-import os
+import json
 import platform
-import shutil
+import select
 import socket
 import subprocess
 import sys
@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from antigravity_whale_pet.protocol import PET_HOST
+from antigravity_whale_pet.protocol import PET_HOST, PET_PORT
 
 WATCHER_LOCK_PORT = 39482
 AUTOSTART_NAME = "AntigravityWhalePetWatcher"
@@ -41,7 +41,7 @@ _POSIX_PROCESS_NAMES = frozenset(
 
 
 def _is_antigravity_running_windows() -> bool:
-    """Fast (<1ms), zero-subprocess Win32 process snapshot check."""
+    """Fast, zero-subprocess Win32 process snapshot check."""
     TH32CS_SNAPPROCESS = 0x00000002
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
@@ -148,11 +148,23 @@ def _gui_python_executable() -> str:
     return str(exe)
 
 
+def _is_udp_port_in_use(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((PET_HOST, port))
+        return False
+    except OSError:
+        return True
+    finally:
+        sock.close()
+
+
 def _acquire_watcher_lock() -> Optional[socket.socket]:
     """Ensure only one `agy-pet watch` daemon runs at a time."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind((PET_HOST, WATCHER_LOCK_PORT))
+        sock.setblocking(False)
         return sock
     except OSError:
         sock.close()
@@ -161,11 +173,33 @@ def _acquire_watcher_lock() -> Optional[socket.socket]:
 
 def is_watcher_running() -> bool:
     """Return True if an `agy-pet watch` daemon is currently active."""
-    sock = _acquire_watcher_lock()
-    if sock is None:
+    return _is_udp_port_in_use(WATCHER_LOCK_PORT)
+
+
+def stop_watcher_daemon() -> bool:
+    """Ask any active `agy-pet watch` daemon to exit cleanly."""
+    if not is_watcher_running():
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(b"STOP_WATCHER", (PET_HOST, WATCHER_LOCK_PORT))
         return True
-    sock.close()
-    return False
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _notify_pet_antigravity_closed() -> None:
+    """Tell any running pet instance that Antigravity has closed."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        payload = json.dumps({"event": "AntigravityClosed", "ts": time.time()}).encode("utf-8")
+        sock.sendto(payload, (PET_HOST, PET_PORT))
+    except OSError:
+        pass
+    finally:
+        sock.close()
 
 
 def run_watcher_daemon(
@@ -175,7 +209,7 @@ def run_watcher_daemon(
 ) -> None:
     """Keep the pet automatically synced with Antigravity's open/close lifecycle.
 
-    - Starts the desktop pet automatically when Antigravity opens.
+    - Starts the desktop pet automatically when Antigravity opens (unless one is already open).
     - Closes the desktop pet automatically when Antigravity exits.
     - If the user manually quits the pet while Antigravity is still open,
       respects that choice until Antigravity is closed and opened again.
@@ -209,24 +243,40 @@ def run_watcher_daemon(
 
     def _stop_pet() -> None:
         nonlocal pet_proc
+        _notify_pet_antigravity_closed()
         if pet_proc is None:
             return
         if pet_proc.poll() is None:
             try:
-                pet_proc.terminate()
-                pet_proc.wait(timeout=3.0)
+                pet_proc.wait(timeout=2.5)
             except Exception:
                 try:
-                    pet_proc.kill()
+                    pet_proc.terminate()
+                    pet_proc.wait(timeout=2.0)
                 except Exception:
-                    pass
+                    try:
+                        pet_proc.kill()
+                    except Exception:
+                        pass
         pet_proc = None
+
+    def _wait_or_stop(timeout: float) -> bool:
+        """Sleep up to timeout seconds, returning True if STOP_WATCHER command arrived."""
+        try:
+            readable, _, _ = select.select([lock_sock], [], [], timeout)
+            if readable:
+                data, _ = lock_sock.recvfrom(1024)
+                if data.strip() == b"STOP_WATCHER":
+                    return True
+        except Exception:
+            time.sleep(timeout)
+        return False
 
     try:
         while True:
             agy_alive = is_antigravity_running()
 
-            # Track whether the user manually closed the pet while Antigravity remained open
+            # Detect if the user manually closed the pet while Antigravity is still running
             if pet_proc is not None and pet_proc.poll() is not None:
                 pet_proc = None
                 if agy_alive:
@@ -238,7 +288,12 @@ def run_watcher_daemon(
                     dismissed_for_session = False
                 was_running = True
 
-                if pet_proc is None and not dismissed_for_session:
+                # Spawn pet only if not dismissed and no existing pet already holds PET_PORT
+                if (
+                    pet_proc is None
+                    and not dismissed_for_session
+                    and not _is_udp_port_in_use(PET_PORT)
+                ):
                     try:
                         pet_proc = _spawn_pet()
                     except Exception:
@@ -254,11 +309,11 @@ def run_watcher_daemon(
                 else:
                     dismissed_for_session = False
 
-            time.sleep(poll_interval)
+            if _wait_or_stop(poll_interval):
+                break
     except KeyboardInterrupt:
         pass
     finally:
-        _stop_pet()
         lock_sock.close()
 
 
@@ -380,8 +435,11 @@ def start_watcher_background(assets_dir: Optional[str] = None, scale: float = 1.
     return True
 
 
-def disable_autostart() -> bool:
-    """Remove `agy-pet watch` login auto-start registration."""
+def disable_autostart(stop_running: bool = True) -> bool:
+    """Remove `agy-pet watch` login auto-start registration and stop running daemon."""
+    if stop_running:
+        stop_watcher_daemon()
+
     system = platform.system()
     if system == "Windows":
         import winreg
